@@ -67,40 +67,44 @@ def login_kite() -> KiteConnect:
     if data2.get("status") != "success":
         raise RuntimeError(f"Kite TOTP step failed: {data2}")
 
-    # Step 3 — get request_token via connect login + finish POST (simulates "Allow" click)
+    # Step 3 — get request_token
+    # After web login, visiting the connect login URL redirects to /connect/finish?sess_id=xxx
+    # GET-ing that finish URL causes Kite to redirect to 127.0.0.1/?request_token=xxx
+    # requests raises ConnectionError when it tries to connect to 127.0.0.1 —
+    # the request_token lives inside that error string.
     login_url = kite.login_url()
 
-    def _extract_request_token(url: str) -> str | None:
-        if "request_token=" in url:
-            return url.split("request_token=")[1].split("&")[0]
+    def _extract_request_token(text: str) -> str | None:
+        if "request_token=" in text:
+            token = text.split("request_token=")[1]
+            # Strip any trailing characters that aren't part of the token
+            for ch in ("&", "'", '"', " ", "\n", ")"):
+                token = token.split(ch)[0]
+            return token
         return None
 
-    # Visit connect login URL — expect redirect to /connect/finish?sess_id=xxx
+    # Visit connect login URL to get /connect/finish URL
     resp3 = session.get(login_url, allow_redirects=False, timeout=15)
     finish_url = resp3.headers.get("Location", "")
 
-    # If we already have request_token at this point, we're done
+    # Already have request_token? (shouldn't happen but handle it)
     request_token = _extract_request_token(finish_url)
 
-    # Otherwise we're at /connect/finish — extract sess_id and POST to authorise
-    if not request_token and "sess_id=" in finish_url:
-        sess_id = finish_url.split("sess_id=")[1].split("&")[0]
-
-        # POST to /connect/finish simulates the user clicking "Allow"
-        resp4 = session.post(
-            "https://kite.zerodha.com/connect/finish",
-            data={"sess_id": sess_id, "api_key": api_key},
-            allow_redirects=False,
-            timeout=15,
-        )
-        redirect = resp4.headers.get("Location", "")
-        request_token = _extract_request_token(redirect)
-
-        # Some Kite versions redirect to the finish URL again — follow one more hop
-        if not request_token and redirect:
-            resp5 = session.get(redirect, allow_redirects=False, timeout=15)
-            redirect2 = resp5.headers.get("Location", "")
-            request_token = _extract_request_token(redirect2)
+    # GET the finish URL — Kite will redirect to 127.0.0.1/?request_token=xxx
+    # Catch the ConnectionError that occurs when requests tries to hit 127.0.0.1
+    if not request_token and finish_url:
+        try:
+            resp4 = session.get(finish_url, allow_redirects=True, timeout=15)
+            # If no ConnectionError, check the final URL
+            request_token = _extract_request_token(resp4.url)
+            if not request_token:
+                for r in resp4.history:
+                    request_token = _extract_request_token(r.headers.get("Location", ""))
+                    if request_token:
+                        break
+        except requests.exceptions.ConnectionError as e:
+            # The error contains the 127.0.0.1 URL with request_token
+            request_token = _extract_request_token(str(e))
 
     if not request_token:
         raise RuntimeError(
