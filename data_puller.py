@@ -67,9 +67,7 @@ def login_kite() -> KiteConnect:
     if data2.get("status") != "success":
         raise RuntimeError(f"Kite TOTP step failed: {data2}")
 
-    # Step 3 — navigate connect login URL and catch the request_token
-    # Strategy: never follow redirects to 127.0.0.1 (it doesn't exist as a server).
-    # Instead read each Location header hop-by-hop until we find request_token.
+    # Step 3 — get request_token via connect login + finish POST (simulates "Allow" click)
     login_url = kite.login_url()
 
     def _extract_request_token(url: str) -> str | None:
@@ -77,33 +75,37 @@ def login_kite() -> KiteConnect:
             return url.split("request_token=")[1].split("&")[0]
         return None
 
-    def _hop(url: str) -> tuple[str, str]:
-        """GET url without following redirects. Returns (location_header, response_url)."""
-        try:
-            r = session.get(url, allow_redirects=False, timeout=15)
-            return r.headers.get("Location", ""), r.url
-        except requests.exceptions.ConnectionError:
-            # Expected when redirect target is 127.0.0.1 — return the url we tried
-            return url, url
+    # Visit connect login URL — expect redirect to /connect/finish?sess_id=xxx
+    resp3 = session.get(login_url, allow_redirects=False, timeout=15)
+    finish_url = resp3.headers.get("Location", "")
 
-    request_token = None
-    current_url   = login_url
+    # If we already have request_token at this point, we're done
+    request_token = _extract_request_token(finish_url)
 
-    # Walk up to 6 redirect hops
-    for _ in range(6):
-        location, _ = _hop(current_url)
-        if not location:
-            break
-        token = _extract_request_token(location)
-        if token:
-            request_token = token
-            break
-        current_url = location
+    # Otherwise we're at /connect/finish — extract sess_id and POST to authorise
+    if not request_token and "sess_id=" in finish_url:
+        sess_id = finish_url.split("sess_id=")[1].split("&")[0]
+
+        # POST to /connect/finish simulates the user clicking "Allow"
+        resp4 = session.post(
+            "https://kite.zerodha.com/connect/finish",
+            data={"sess_id": sess_id, "api_key": api_key},
+            allow_redirects=False,
+            timeout=15,
+        )
+        redirect = resp4.headers.get("Location", "")
+        request_token = _extract_request_token(redirect)
+
+        # Some Kite versions redirect to the finish URL again — follow one more hop
+        if not request_token and redirect:
+            resp5 = session.get(redirect, allow_redirects=False, timeout=15)
+            redirect2 = resp5.headers.get("Location", "")
+            request_token = _extract_request_token(redirect2)
 
     if not request_token:
         raise RuntimeError(
-            f"Could not extract request_token after following redirects. "
-            f"Last URL seen: {current_url}"
+            f"Could not extract request_token. "
+            f"Finish URL was: {finish_url}"
         )
 
     # Step 4 — generate session
