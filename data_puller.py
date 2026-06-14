@@ -278,45 +278,40 @@ def get_ohlc_indicators(kite: KiteConnect) -> dict:
             "weekly_macd_signal","weekly_macd_status","weekly_structure"
         ]})
 
-    # 4H candles (resample from 60-min)
+    # 4H equivalent — use 60-min candles directly (Kite has no native 4H interval)
+    # RSI and MACD on 60-min candles give the same intraday structure signal
     try:
         intraday = _fetch_candles(kite, NIFTY_TOKEN, "60minute", from_30d, today)
+        # Filter to market hours only (9:00–16:00 IST) to remove noise
         if not intraday.empty:
-            h4 = intraday.resample("4H").agg({
-                "open": "first", "high": "max", "low": "min",
-                "close": "last", "volume": "sum"
-            }).dropna()
-            if len(h4) >= 20:
-                h4["rsi"] = _rsi(h4["close"])
-                hml, hsl, _ = _macd(h4["close"])
-                h4["macd_line"]   = hml
-                h4["macd_signal"] = hsl
+            intraday = intraday.between_time("09:00", "16:00")
 
-                hlast = h4.iloc[-1]
-                hprev = h4.iloc[-2]
-                result["h4_rsi"]     = round(hlast["rsi"], 2)
-                result["h4_rsi_dir"] = "Rising" if hlast["rsi"] > hprev["rsi"] else "Falling"
-                result["h4_macd_line"]   = round(hlast["macd_line"], 2)
-                result["h4_macd_signal"] = round(hlast["macd_signal"], 2)
-                result["h4_macd_status"] = (
-                    "Bullish" if hlast["macd_line"] > hlast["macd_signal"] else "Bearish"
-                )
-                result["h4_structure"] = _structure(h4.tail(30))
-            else:
-                result.update({k: "Not Available" for k in [
-                    "h4_rsi","h4_rsi_dir","h4_macd_line",
-                    "h4_macd_signal","h4_macd_status","h4_structure"
-                ]})
+        if not intraday.empty and len(intraday) >= 20:
+            intraday["rsi"] = _rsi(intraday["close"])
+            hml, hsl, _     = _macd(intraday["close"])
+            intraday["macd_line"]   = hml
+            intraday["macd_signal"] = hsl
+
+            hlast = intraday.iloc[-1]
+            hprev = intraday.iloc[-2]
+            result["h4_rsi"]         = round(hlast["rsi"], 2)
+            result["h4_rsi_dir"]     = "Rising" if hlast["rsi"] > hprev["rsi"] else "Falling"
+            result["h4_macd_line"]   = round(hlast["macd_line"], 2)
+            result["h4_macd_signal"] = round(hlast["macd_signal"], 2)
+            result["h4_macd_status"] = (
+                "Bullish" if hlast["macd_line"] > hlast["macd_signal"] else "Bearish"
+            )
+            result["h4_structure"] = _structure(intraday.tail(30))
         else:
             result.update({k: "Not Available" for k in [
-                "h4_rsi","h4_rsi_dir","h4_macd_line",
-                "h4_macd_signal","h4_macd_status","h4_structure"
+                "h4_rsi", "h4_rsi_dir", "h4_macd_line",
+                "h4_macd_signal", "h4_macd_status", "h4_structure"
             ]})
     except Exception as e:
         result["h4_error"] = str(e)
         result.update({k: "Not Available" for k in [
-            "h4_rsi","h4_rsi_dir","h4_macd_line",
-            "h4_macd_signal","h4_macd_status","h4_structure"
+            "h4_rsi", "h4_rsi_dir", "h4_macd_line",
+            "h4_macd_signal", "h4_macd_status", "h4_structure"
         ]})
 
     return result
@@ -782,8 +777,8 @@ Mode: Standard Mode
 | Weekly RSI               | {weekly_rsi_str}                           |
 | Weekly MACD              | {weekly_macd_str}                          |
 | Weekly Structure         | {v('weekly_structure')}                    |
-| 4H RSI                   | {h4_rsi_str}                              |
-| 4H MACD                  | {h4_macd_str}                             |
+| 4H RSI (60min equiv)     | {h4_rsi_str}                              |
+| 4H MACD (60min equiv)    | {h4_macd_str}                             |
 | 4H Structure             | {v('h4_structure')}                        |
 | VIX                      | {vix_str}                                  |
 | VIX Trend                | {v('vix_trend')}                           |
