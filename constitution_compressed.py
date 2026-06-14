@@ -74,6 +74,23 @@ Far Expiry:  DTE > 10  — Theta benefit limited; verify premium selling is not 
 
 Nifty weekly expiry = every Tuesday. Calculate DTE from session date to next Tuesday.
 
+DUAL CHAIN PROTOCOL (activates when DTE ≤ 2)
+When DTE ≤ 2, Section 0 contains TWO option chains. Governance rules:
+
+CURRENT EXPIRY CHAIN — the expiring contract.
+- Use ONLY for managing open positions in the expiring contract.
+- Do NOT use for new trade directional analysis.
+- Do NOT use for new trade structure selection.
+
+NEXT EXPIRY CHAIN — next week's contract. This is the PRIMARY chain.
+- All directional analysis in Sections 1–9 must reference the NEXT EXPIRY chain exclusively.
+- Agent 1, 2, 4, 5 must base OI signals (PCR, major strikes, OI change) on next expiry data.
+- Agent 7 must target next expiry strikes for all new trade structures in Section 10.
+- Agent 7 must explicitly state which expiry each proposed structure targets.
+- OI change on next expiry may show zero if this is the first run tracking it — noted in Section 1.
+
+When dual chain is NOT present (DTE > 2), standard single-chain protocol applies.
+
 WEEKLY CHART — Tier 1 input required by Agent 2. Without it, Agent 2 operates at Moderate Confidence maximum.
 
 DATA EXTRACTION REPORT (Section 0) — Agent 6 creates before any analysis.

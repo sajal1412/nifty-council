@@ -50,12 +50,23 @@ def _build_alert_card(raw_data: dict, time_str: str) -> str:
 
     dte_label = _dte_emoji(int(dte) if str(dte).isdigit() else 99)
 
+    # Dual chain line — shown when DTE <= 2 and next expiry data was pulled
+    dual_line = ""
+    next_pcr = raw_data.get("next_pcr_aggregate")
+    if next_pcr is not None:
+        next_exp = raw_data.get("next_expiry", "")
+        next_exp_str = (
+            next_exp.strftime("%d-%b-%Y") if hasattr(next_exp, "strftime") else str(next_exp)
+        )
+        dual_line = f"🔗 *DUAL CHAIN:* Next {next_exp_str} — PCR {next_pcr}\n"
+
     msg = (
         f"📊 *NIFTY COUNCIL DATA — {date_str} ({time_str} IST)*\n"
         f"{'─' * 32}\n\n"
         f"📅 *Expiry:* {expiry} | DTE: {dte} — {dte_label}\n"
         f"📈 *VIX:* {vix} — {vix_trend}\n"
-        f"⚖️ *PCR:* {pcr}\n"
+        f"⚖️ *PCR (curr):* {pcr}\n"
+        f"{dual_line}"
         f"📉 *Daily RSI:* {daily_rsi}\n"
         f"🧭 *Breadth:* {breadth}\n"
         f"📦 *Futures OI:* {fut_class}\n"

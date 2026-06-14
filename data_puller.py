@@ -391,12 +391,134 @@ def _save_futures_oi_cache(symbol: str, oi: int) -> None:
         print(f"Warning: could not save futures OI cache: {e}")
 
 
+# ── Option chain helpers ───────────────────────────────────────────────────────
+
+def _fetch_quotes_for_opts(kite: KiteConnect, nifty_opts: list) -> dict:
+    """Fetch Kite quotes for option instruments, chunked to 400 per request."""
+    tokens = [i["instrument_token"] for i in nifty_opts]
+    quotes = {}
+    for chunk_start in range(0, len(tokens), 400):
+        chunk = tokens[chunk_start: chunk_start + 400]
+        q = kite.quote(chunk)
+        quotes.update(q)
+        time.sleep(0.3)
+    return quotes
+
+
+def _compute_chain_from_quotes(
+    nifty_opts: list, quotes: dict, prev_strikes: dict, current_price: float = None
+) -> tuple:
+    """Build strike_data and compute chain metrics. Returns (strike_data, metrics)."""
+    strike_data: dict = {}
+    for inst in nifty_opts:
+        token  = inst["instrument_token"]
+        key    = f"NFO:{inst['tradingsymbol']}"
+        q      = quotes.get(key) or quotes.get(str(token), {})
+        strike = inst["strike"]
+        itype  = inst["instrument_type"]
+        oi     = q.get("oi", 0) or 0
+        ltp    = q.get("last_price", 0) or 0
+
+        if strike not in strike_data:
+            strike_data[strike] = {
+                "call_oi": 0, "put_oi": 0,
+                "call_oi_prev": 0, "put_oi_prev": 0,
+                "call_ltp": 0, "put_ltp": 0,
+            }
+        prev = prev_strikes.get(str(strike), {})
+        if itype == "CE":
+            strike_data[strike]["call_oi"]      = oi
+            strike_data[strike]["call_oi_prev"]  = prev.get("call_oi", oi)
+            strike_data[strike]["call_ltp"]      = ltp
+        else:
+            strike_data[strike]["put_oi"]        = oi
+            strike_data[strike]["put_oi_prev"]   = prev.get("put_oi", oi)
+            strike_data[strike]["put_ltp"]       = ltp
+
+    df = pd.DataFrame.from_dict(strike_data, orient="index").sort_index()
+    df.index.name = "strike"
+
+    total_call_oi = df["call_oi"].sum()
+    total_put_oi  = df["put_oi"].sum()
+    pcr_aggregate = round(total_put_oi / total_call_oi, 3) if total_call_oi else 0
+
+    if current_price:
+        atm = min(df.index, key=lambda x: abs(x - current_price))
+    else:
+        atm = df.index[len(df) // 2]
+
+    atm_idx    = list(df.index).index(atm)
+    near_range = df.iloc[max(0, atm_idx - 5): atm_idx + 6]
+    snap_call  = near_range["call_oi"].sum()
+    snap_put   = near_range["put_oi"].sum()
+    pcr_snapshot = round(snap_put / snap_call, 3) if snap_call else 0
+
+    top3_call_oi = (
+        df["call_oi"].nlargest(3).reset_index()
+        .apply(lambda r: f"{int(r['strike'])} ({int(r['call_oi']):,})", axis=1)
+        .tolist()
+    )
+    top3_put_oi = (
+        df["put_oi"].nlargest(3).reset_index()
+        .apply(lambda r: f"{int(r['strike'])} ({int(r['put_oi']):,})", axis=1)
+        .tolist()
+    )
+
+    df["call_oi_chg"] = df["call_oi"] - df["call_oi_prev"]
+    df["put_oi_chg"]  = df["put_oi"]  - df["put_oi_prev"]
+    net_call_chg = df["call_oi_chg"].sum()
+    net_put_chg  = df["put_oi_chg"].sum()
+
+    if net_put_chg > 0 and net_call_chg < 0:
+        oi_classification = "Strongly Bullish (put writing + call unwinding)"
+    elif net_put_chg > 0 and net_call_chg >= 0:
+        oi_classification = "Moderately Bullish (put writing)"
+    elif net_call_chg > 0 and net_put_chg < 0:
+        oi_classification = "Strongly Bearish (call writing + put unwinding)"
+    elif net_call_chg > 0 and net_put_chg >= 0:
+        oi_classification = "Moderately Bearish (call writing)"
+    else:
+        oi_classification = "Mixed / Neutral"
+
+    metrics = {
+        "pcr_aggregate":     pcr_aggregate,
+        "pcr_snapshot":      pcr_snapshot,
+        "top3_call_oi":      ", ".join(top3_call_oi),
+        "top3_put_oi":       ", ".join(top3_put_oi),
+        "oi_classification": oi_classification,
+        "net_call_oi_chg":   int(net_call_chg),
+        "net_put_oi_chg":    int(net_put_chg),
+        "total_call_oi":     int(total_call_oi),
+        "total_put_oi":      int(total_put_oi),
+        "atm_strike":        atm,
+    }
+    return strike_data, metrics
+
+
+def _save_next_oi_cache(next_expiry_str: str, next_strike_data: dict) -> None:
+    """Merge next-expiry OI into the existing cache file."""
+    try:
+        cache = {}
+        if os.path.exists(OI_CACHE_FILE):
+            with open(OI_CACHE_FILE, "r") as f:
+                cache = json.load(f)
+        cache["next_expiry"]  = next_expiry_str
+        cache["next_strikes"] = {
+            str(k): {"call_oi": v["call_oi"], "put_oi": v["put_oi"]}
+            for k, v in next_strike_data.items()
+        }
+        with open(OI_CACHE_FILE, "w") as f:
+            json.dump(cache, f, indent=2)
+    except Exception as e:
+        print(f"Warning: could not save next-expiry OI cache: {e}")
+
+
 # ── Option chain ───────────────────────────────────────────────────────────────
 
 def get_option_chain(kite: KiteConnect, current_price: float = None) -> dict:
     try:
         today  = datetime.date.today()
-        _, expiry, _ = get_dte(today)
+        dte, expiry, _ = get_dte(today)
         expiry_str = expiry.isoformat()
 
         instruments = kite.instruments("NFO")
@@ -409,125 +531,61 @@ def get_option_chain(kite: KiteConnect, current_price: float = None) -> dict:
         ))
         relevant_expiries = [e for e in all_expiries if e >= today][:2]
 
-        nifty_opts = [
+        # ── Current expiry chain ──────────────────────────────────────────────
+        curr_opts = [
             i for i in instruments
             if (i.get("name") == "NIFTY" and
                 i.get("instrument_type") in ("CE", "PE") and
                 i.get("expiry") == expiry)
         ]
-        if not nifty_opts:
+        if not curr_opts:
             return {"option_chain_error": "No Nifty options found for expiry"}
 
-        # Load yesterday's OI cache
         prev_cache = _load_oi_cache()
-        prev_strikes = {}
+        curr_prev_strikes = {}
         if (prev_cache.get("expiry") == expiry_str and
                 prev_cache.get("saved_date") != today.isoformat()):
-            prev_strikes = prev_cache.get("strikes", {})
+            curr_prev_strikes = prev_cache.get("strikes", {})
 
-        tokens = [i["instrument_token"] for i in nifty_opts]
-        quotes = {}
-        for chunk_start in range(0, len(tokens), 400):
-            chunk = tokens[chunk_start: chunk_start + 400]
-            q = kite.quote(chunk)
-            quotes.update(q)
-            time.sleep(0.3)
-
-        # Build strike table
-        strike_data: dict[float, dict] = {}
-        for inst in nifty_opts:
-            token  = inst["instrument_token"]
-            key    = f"NFO:{inst['tradingsymbol']}"
-            q      = quotes.get(key) or quotes.get(str(token), {})
-            strike = inst["strike"]
-            itype  = inst["instrument_type"]
-            oi     = q.get("oi", 0) or 0
-            ltp    = q.get("last_price", 0) or 0
-
-            if strike not in strike_data:
-                strike_data[strike] = {
-                    "call_oi": 0, "put_oi": 0,
-                    "call_oi_prev": 0, "put_oi_prev": 0,
-                    "call_ltp": 0, "put_ltp": 0,
-                }
-            prev = prev_strikes.get(str(strike), {})
-            if itype == "CE":
-                strike_data[strike]["call_oi"]      = oi
-                strike_data[strike]["call_oi_prev"]  = prev.get("call_oi", oi)
-                strike_data[strike]["call_ltp"]      = ltp
-            else:
-                strike_data[strike]["put_oi"]        = oi
-                strike_data[strike]["put_oi_prev"]   = prev.get("put_oi", oi)
-                strike_data[strike]["put_ltp"]       = ltp
-
-        # Save today's OI for tomorrow's run
-        _save_oi_cache(expiry_str, strike_data)
-
-        df = pd.DataFrame.from_dict(strike_data, orient="index").sort_index()
-        df.index.name = "strike"
-
-        total_call_oi = df["call_oi"].sum()
-        total_put_oi  = df["put_oi"].sum()
-        pcr_aggregate = round(total_put_oi / total_call_oi, 3) if total_call_oi else 0
-
-        # ATM strike
-        if current_price:
-            atm = min(df.index, key=lambda x: abs(x - current_price))
-        else:
-            atm = df.index[len(df) // 2]
-
-        # Snapshot PCR — OI within ±5 strikes of ATM
-        atm_idx   = list(df.index).index(atm)
-        near_range = df.iloc[max(0, atm_idx - 5): atm_idx + 6]
-        snap_call = near_range["call_oi"].sum()
-        snap_put  = near_range["put_oi"].sum()
-        pcr_snapshot = round(snap_put / snap_call, 3) if snap_call else 0
-
-        top3_call_oi = (
-            df["call_oi"].nlargest(3).reset_index()
-            .apply(lambda r: f"{int(r['strike'])} ({int(r['call_oi']):,})", axis=1)
-            .tolist()
-        )
-        top3_put_oi = (
-            df["put_oi"].nlargest(3).reset_index()
-            .apply(lambda r: f"{int(r['strike'])} ({int(r['put_oi']):,})", axis=1)
-            .tolist()
+        curr_quotes = _fetch_quotes_for_opts(kite, curr_opts)
+        curr_strike_data, curr_metrics = _compute_chain_from_quotes(
+            curr_opts, curr_quotes, curr_prev_strikes, current_price
         )
 
-        # OI change classification
-        df["call_oi_chg"] = df["call_oi"] - df["call_oi_prev"]
-        df["put_oi_chg"]  = df["put_oi"]  - df["put_oi_prev"]
-        net_call_chg = df["call_oi_chg"].sum()
-        net_put_chg  = df["put_oi_chg"].sum()
+        # Save current expiry OI for tomorrow's run
+        _save_oi_cache(expiry_str, curr_strike_data)
 
-        if net_put_chg > 0 and net_call_chg < 0:
-            oi_classification = "Strongly Bullish (put writing + call unwinding)"
-        elif net_put_chg > 0 and net_call_chg >= 0:
-            oi_classification = "Moderately Bullish (put writing)"
-        elif net_call_chg > 0 and net_put_chg < 0:
-            oi_classification = "Strongly Bearish (call writing + put unwinding)"
-        elif net_call_chg > 0 and net_put_chg >= 0:
-            oi_classification = "Moderately Bearish (call writing)"
-        else:
-            oi_classification = "Mixed / Neutral"
+        result = {**curr_metrics, "expiry": expiry}
 
-        # Top OI change strikes
-        top_put_writing  = df.nlargest(3, "put_oi_chg")[["put_oi_chg"]].reset_index()
-        top_call_writing = df.nlargest(3, "call_oi_chg")[["call_oi_chg"]].reset_index()
+        # ── Next expiry chain (only when DTE <= 2) ────────────────────────────
+        if dte <= 2 and len(relevant_expiries) >= 2:
+            next_expiry = relevant_expiries[1]
+            next_expiry_str = next_expiry.isoformat()
 
-        return {
-            "pcr_aggregate":     pcr_aggregate,
-            "pcr_snapshot":      pcr_snapshot,
-            "top3_call_oi":      ", ".join(top3_call_oi),
-            "top3_put_oi":       ", ".join(top3_put_oi),
-            "oi_classification": oi_classification,
-            "net_call_oi_chg":   int(net_call_chg),
-            "net_put_oi_chg":    int(net_put_chg),
-            "total_call_oi":     int(total_call_oi),
-            "total_put_oi":      int(total_put_oi),
-            "atm_strike":        atm,
-            "expiry":            expiry,
-        }
+            next_opts = [
+                i for i in instruments
+                if (i.get("name") == "NIFTY" and
+                    i.get("instrument_type") in ("CE", "PE") and
+                    i.get("expiry") == next_expiry)
+            ]
+            if next_opts:
+                next_prev_strikes = {}
+                if (prev_cache.get("next_expiry") == next_expiry_str and
+                        prev_cache.get("saved_date") != today.isoformat()):
+                    next_prev_strikes = prev_cache.get("next_strikes", {})
+
+                next_quotes = _fetch_quotes_for_opts(kite, next_opts)
+                next_strike_data, next_metrics = _compute_chain_from_quotes(
+                    next_opts, next_quotes, next_prev_strikes, current_price
+                )
+                for k, val in next_metrics.items():
+                    result[f"next_{k}"] = val
+                result["next_expiry"] = next_expiry
+
+                # Save next expiry OI for tomorrow's OI change calculation
+                _save_next_oi_cache(next_expiry_str, next_strike_data)
+
+        return result
     except Exception as e:
         return {"option_chain_error": str(e)}
 
@@ -798,7 +856,45 @@ Mode: Standard Mode
 | Current Expiry           | {v('expiry')} (Tuesday Weekly)             |
 | Days to Expiry (DTE)     | {v('dte')}                                 |
 | DTE Classification       | {v('dte_class')}                           |
+"""
 
+    # Dual chain section — appended when DTE <= 2 and next expiry data is available
+    if d.get("next_pcr_aggregate") is not None:
+        next_expiry_val  = d.get("next_expiry", "?")
+        next_expiry_disp = (
+            next_expiry_val.strftime("%d-%b-%Y")
+            if hasattr(next_expiry_val, "strftime")
+            else str(next_expiry_val)
+        )
+
+        def nv(key, default="Not Available"):
+            val = d.get(key, default)
+            return str(val) if val is not None else default
+
+        report += f"""
+================================================================
+DUAL CHAIN MODE ACTIVE (DTE <= 2)
+================================================================
+CURRENT EXPIRY CHAIN ({v('expiry')}) — reference only for open position management.
+Do NOT use current expiry chain for new trade directional analysis.
+
+NEXT EXPIRY CHAIN ({next_expiry_disp}) — PRIMARY chain for all new trade analysis.
+Sections 1-9 must use NEXT EXPIRY option data exclusively for directional signals.
+Section 10 structures must target NEXT EXPIRY strikes.
+Note: OI change on next expiry shows zero if this is the first run tracking it.
+
+| Metric                   | Value                                      |
+|--------------------------|--------------------------------------------|
+| Aggregate PCR            | {nv('next_pcr_aggregate')}                |
+| Snapshot PCR             | {nv('next_pcr_snapshot')}                 |
+| Major Call OI Strikes    | {nv('next_top3_call_oi')}                 |
+| Major Put OI Strikes     | {nv('next_top3_put_oi')}                  |
+| Net Call OI Change       | {nv('next_net_call_oi_chg')} contracts    |
+| Net Put OI Change        | {nv('next_net_put_oi_chg')} contracts     |
+| OI Change Classification | {nv('next_oi_classification')}            |
+"""
+
+    report += f"""
 Extraction Confidence: {confidence_mode}
 Missing: {', '.join(missing) if missing else 'None'}
 """
