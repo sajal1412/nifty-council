@@ -70,31 +70,45 @@ def login_kite() -> KiteConnect:
     # Step 3 — follow Kite Connect login URL to get request_token
     login_url = kite.login_url()
 
-    # Follow redirects and check each URL for request_token or sess_id
-    resp3 = session.get(login_url, allow_redirects=True, timeout=15)
-    final_url = resp3.url
+    def _extract_token(url: str) -> str | None:
+        if "request_token=" in url:
+            return url.split("request_token=")[1].split("&")[0]
+        return None
 
-    request_token = None
+    # First pass — visit connect login URL (don't follow redirects so we see each hop)
+    resp3 = session.get(login_url, allow_redirects=False, timeout=15)
+    location = resp3.headers.get("Location", "")
 
-    # Check final URL for request_token
-    if "request_token=" in final_url:
-        request_token = final_url.split("request_token=")[1].split("&")[0]
-    # Kite sometimes returns sess_id instead of request_token
-    elif "sess_id=" in final_url:
-        request_token = final_url.split("sess_id=")[1].split("&")[0]
-    else:
-        # Walk the redirect history
-        for r in resp3.history:
-            loc = r.headers.get("Location", "")
-            if "request_token=" in loc:
-                request_token = loc.split("request_token=")[1].split("&")[0]
-                break
-            if "sess_id=" in loc:
-                request_token = loc.split("sess_id=")[1].split("&")[0]
-                break
+    request_token = _extract_token(location)
+
+    # If we landed on /connect/finish?sess_id=... we need one more step
+    if not request_token and "connect/finish" in location and "sess_id=" in location:
+        resp4 = session.get(location, allow_redirects=False, timeout=15)
+        location2 = resp4.headers.get("Location", "")
+        request_token = _extract_token(location2)
+
+        # If still not found, follow all redirects from finish page
+        if not request_token:
+            resp5 = session.get(location, allow_redirects=True, timeout=15)
+            request_token = _extract_token(resp5.url)
+            if not request_token:
+                for r in resp5.history:
+                    request_token = _extract_token(r.headers.get("Location", ""))
+                    if request_token:
+                        break
+
+    # Last resort — follow everything from the original login URL
+    if not request_token:
+        resp_full = session.get(login_url, allow_redirects=True, timeout=15)
+        request_token = _extract_token(resp_full.url)
+        for r in resp_full.history:
+            if not request_token:
+                request_token = _extract_token(r.headers.get("Location", ""))
 
     if not request_token:
-        raise RuntimeError(f"Could not extract request_token from redirect: {final_url}")
+        raise RuntimeError(
+            f"Could not extract request_token. Final redirect was: {location}"
+        )
 
     # Step 4 — generate session
     sess_data = kite.generate_session(request_token, api_secret=api_secret)
