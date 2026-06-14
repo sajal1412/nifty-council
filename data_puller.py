@@ -282,8 +282,10 @@ def get_ohlc_indicators(kite: KiteConnect) -> dict:
     # RSI and MACD on 60-min candles give the same intraday structure signal
     try:
         intraday = _fetch_candles(kite, NIFTY_TOKEN, "60minute", from_30d, today)
-        # Filter to market hours only (9:00–16:00 IST) to remove noise
+        # Filter to market hours only — strip timezone before between_time
         if not intraday.empty:
+            if intraday.index.tz is not None:
+                intraday.index = intraday.index.tz_localize(None)
             intraday = intraday.between_time("09:00", "16:00")
 
         if not intraday.empty and len(intraday) >= 20:
@@ -309,6 +311,7 @@ def get_ohlc_indicators(kite: KiteConnect) -> dict:
             ]})
     except Exception as e:
         result["h4_error"] = str(e)
+        print(f"4H data error: {e}")
         result.update({k: "Not Available" for k in [
             "h4_rsi", "h4_rsi_dir", "h4_macd_line",
             "h4_macd_signal", "h4_macd_status", "h4_structure"
