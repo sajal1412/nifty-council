@@ -1,0 +1,6 @@
+anthropic>=0.40.0
+kiteconnect>=5.0.1
+pyotp>=2.9.0
+pandas>=2.2.0
+numpy>=1.26.0
+requests>=2.31.0

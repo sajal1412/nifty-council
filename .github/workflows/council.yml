@@ -1,0 +1,61 @@
+name: Nifty Council Daily Analysis
+
+on:
+  schedule:
+    # 03:00 UTC = 8:30 AM IST  — pre-market / overnight data
+    - cron: '00 03 * * 1-5'
+    # 04:30 UTC = 10:00 AM IST — primary, ~45 min after market open
+    - cron: '30 04 * * 1-5'
+    # 08:00 UTC = 1:30 PM IST  — mid-session check
+    - cron: '00 08 * * 1-5'
+  workflow_dispatch:
+    # Manual trigger from GitHub mobile app or website
+
+jobs:
+  run-council:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to commit oi_cache.json back to repo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch with token so the commit step can push
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Council pipeline
+        env:
+          KITE_API_KEY:       ${{ secrets.KITE_API_KEY }}
+          KITE_API_SECRET:    ${{ secrets.KITE_API_SECRET }}
+          KITE_USER_ID:       ${{ secrets.KITE_USER_ID }}
+          KITE_PASSWORD:      ${{ secrets.KITE_PASSWORD }}
+          KITE_TOTP_SECRET:   ${{ secrets.KITE_TOTP_SECRET }}
+          ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python council_runner.py
+
+      - name: Commit OI cache for tomorrow's run
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add oi_cache.json || true
+          git diff --staged --quiet || git commit -m "chore: update OI cache [skip ci]"
+          git push || true
+
+      - name: Upload Council report as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: council-report-${{ github.run_id }}
+          path: Council_*.txt
+          retention-days: 30
