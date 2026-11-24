@@ -1207,6 +1207,7 @@
     }
   },
   "futures": {
-    "NIFTY26NOVFUT": 4612465
+    "NIFTY26NOVFUT": 4612465,
+    "NIFTY26DECFUT": 11790610
   }
 }
